@@ -13,54 +13,63 @@ import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
-import android.view.View
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.ImageView
 import android.widget.Toast
 import java.io.ByteArrayOutputStream
 import kotlin.concurrent.thread
+import kotlin.math.abs
 
 class WhisperAccessibilityService : AccessibilityService() {
 
     companion object {
         var instance: WhisperAccessibilityService? = null
         private const val SAMPLE_RATE = 16000
+        private const val BTN_DP = 44
+        private const val PAD_DP = 10
+        private const val MARGIN_DP = 8
+        private const val TAP_THRESHOLD_DP = 10
+
+        // OpenAI-ish palette
+        private const val COLOR_IDLE = 0xDD1C1C1E.toInt()        // dark gray
+        private const val COLOR_RECORDING = 0xDDEF4444.toInt()   // red
+        private const val COLOR_BUSY = 0xDD6B6B6B.toInt()        // mid gray
     }
 
     private enum class State { IDLE, RECORDING, TRANSCRIBING }
 
     private var state = State.IDLE
-    private var overlayView: View? = null
+    private var button: ImageView? = null
+    private var layoutParams: WindowManager.LayoutParams? = null
     private var audioRecord: AudioRecord? = null
     private var pcmStream: ByteArrayOutputStream? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    override fun onServiceConnected() {
-        instance = this
-        showOverlay()
-    }
+    private val dp get() = resources.displayMetrics.density
+    private val screenW get() = resources.displayMetrics.widthPixels
+    private val screenH get() = resources.displayMetrics.heightPixels
 
+    override fun onServiceConnected() { instance = this; showOverlay() }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
+    override fun onDestroy() { instance = null; removeOverlay(); super.onDestroy() }
 
-    override fun onDestroy() {
-        instance = null
-        removeOverlay()
-        super.onDestroy()
-    }
-
-    // --- Overlay (TYPE_ACCESSIBILITY_OVERLAY — no extra permission needed) ---
+    // --- Overlay ---
 
     private fun showOverlay() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val dp = resources.displayMetrics.density
-        val size = (56 * dp).toInt()
+        val size = (BTN_DP * dp).toInt()
+        val pad = (PAD_DP * dp).toInt()
+        val margin = (MARGIN_DP * dp).toInt()
 
-        val button = View(this).apply {
-            background = circle(Color.GREEN)
-            alpha = 0.85f
-            setOnClickListener { onTap() }
+        val img = ImageView(this).apply {
+            setImageResource(R.drawable.ic_mic)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(pad, pad, pad, pad)
+            background = circle(COLOR_IDLE)
         }
 
         val params = WindowManager.LayoutParams(
@@ -69,18 +78,53 @@ class WhisperAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            x = (16 * dp).toInt()
+            gravity = Gravity.TOP or Gravity.START
+            x = screenW - size - margin
+            y = screenH / 2 - size / 2
         }
 
-        wm.addView(button, params)
-        overlayView = button
+        // Drag + tap handling
+        var startX = 0; var startY = 0
+        var touchX = 0f; var touchY = 0f
+
+        img.setOnTouchListener { v, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = params.x; startY = params.y
+                    touchX = ev.rawX; touchY = ev.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = startX + (ev.rawX - touchX).toInt()
+                    params.y = startY + (ev.rawY - touchY).toInt()
+                    wm.updateViewLayout(v, params)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
+                    if (moved < TAP_THRESHOLD_DP * dp) {
+                        onTap()
+                    } else {
+                        // Snap to nearest horizontal edge
+                        params.x = if (params.x + size / 2 > screenW / 2)
+                            screenW - size - margin else margin
+                        wm.updateViewLayout(v, params)
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+
+        wm.addView(img, params)
+        button = img
+        layoutParams = params
     }
 
     private fun removeOverlay() {
-        overlayView?.let {
+        button?.let {
             (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(it)
-            overlayView = null
+            button = null
         }
     }
 
@@ -88,8 +132,23 @@ class WhisperAccessibilityService : AccessibilityService() {
         shape = GradientDrawable.OVAL; setColor(color)
     }
 
-    private fun setColor(color: Int) {
-        handler.post { overlayView?.background = circle(color) }
+    private fun setAppearance(color: Int) {
+        handler.post { button?.background = circle(color) }
+    }
+
+    private fun startPulse() {
+        button?.let {
+            it.animate().alpha(0.4f).setDuration(500).withEndAction {
+                it.animate().alpha(1f).setDuration(500).withEndAction {
+                    if (state == State.RECORDING) startPulse()
+                }.start()
+            }.start()
+        }
+    }
+
+    private fun stopPulse() {
+        button?.animate()?.cancel()
+        button?.alpha = 1f
     }
 
     // --- State machine ---
@@ -98,7 +157,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         when (state) {
             State.IDLE -> startRecording()
             State.RECORDING -> stopAndTranscribe()
-            State.TRANSCRIBING -> {} // ignore
+            State.TRANSCRIBING -> {}
         }
     }
 
@@ -116,12 +175,13 @@ class WhisperAccessibilityService : AccessibilityService() {
                 MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize
             )
-        } catch (e: SecurityException) { toast("Audio permission denied"); return }
+        } catch (_: SecurityException) { toast("Audio permission denied"); return }
 
         pcmStream = ByteArrayOutputStream()
         audioRecord!!.startRecording()
         state = State.RECORDING
-        setColor(Color.RED)
+        setAppearance(COLOR_RECORDING)
+        startPulse()
 
         thread {
             val buf = ByteArray(bufSize)
@@ -134,7 +194,8 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun stopAndTranscribe() {
         state = State.TRANSCRIBING
-        setColor(Color.parseColor("#2196F3")) // blue
+        stopPulse()
+        setAppearance(COLOR_BUSY)
 
         audioRecord?.stop()
         audioRecord?.release()
@@ -157,16 +218,16 @@ class WhisperAccessibilityService : AccessibilityService() {
                     toast("Error: ${result.error ?: "empty transcript"}")
                 }
                 state = State.IDLE
-                setColor(Color.GREEN)
+                setAppearance(COLOR_IDLE)
             }
         }
     }
 
     private fun reset(msg: String) {
-        toast(msg); state = State.IDLE; setColor(Color.GREEN)
+        toast(msg); state = State.IDLE; setAppearance(COLOR_IDLE)
     }
 
-    // --- Text injection via clipboard + paste ---
+    // --- Text injection ---
 
     private fun injectText(text: String) {
         val clip = ClipData.newPlainText("phonewhisper", text)
