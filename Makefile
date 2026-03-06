@@ -9,7 +9,7 @@ export JAVA_HOME := /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Ho
 export ANDROID_HOME := $(HOME)/Library/Android/sdk
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: build test install adb-install clean
+.PHONY: build test install adb-install push-model clean
 
 build:
 	./gradlew assembleDebug
@@ -25,6 +25,13 @@ install: build
 
 adb-install: build
 	$(ANDROID_HOME)/platform-tools/adb install -r $(APK)
+
+## Push a model to the phone (usage: make push-model MODEL=/path/to/model-dir)
+MODEL_DEST := /sdcard/Android/data/com.kafkasl.phonewhisper/files/models
+push-model:
+	@test -n "$(MODEL)" || (echo "Usage: make push-model MODEL=/path/to/model-dir" && exit 1)
+	$(ANDROID_HOME)/platform-tools/adb push $(MODEL) $(MODEL_DEST)/$(notdir $(MODEL))/
+	@echo "Model pushed: $(notdir $(MODEL))"
 
 clean:
 	./gradlew clean

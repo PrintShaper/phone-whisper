@@ -12,6 +12,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
@@ -27,16 +28,16 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     companion object {
         var instance: WhisperAccessibilityService? = null
+        private const val TAG = "PhoneWhisper"
         private const val SAMPLE_RATE = 16000
         private const val BTN_DP = 44
         private const val PAD_DP = 10
         private const val MARGIN_DP = 8
         private const val TAP_THRESHOLD_DP = 10
 
-        // OpenAI-ish palette
-        private const val COLOR_IDLE = 0xDD1C1C1E.toInt()        // dark gray
-        private const val COLOR_RECORDING = 0xDDEF4444.toInt()   // red
-        private const val COLOR_BUSY = 0xDD6B6B6B.toInt()        // mid gray
+        private const val COLOR_IDLE = 0xDD1C1C1E.toInt()
+        private const val COLOR_RECORDING = 0xDDEF4444.toInt()
+        private const val COLOR_BUSY = 0xDD6B6B6B.toInt()
     }
 
     private enum class State { IDLE, RECORDING, TRANSCRIBING }
@@ -48,14 +49,50 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var pcmStream: ByteArrayOutputStream? = null
     private val handler = Handler(Looper.getMainLooper())
 
+    // Local transcription engine (loaded lazily)
+    private var localTranscriber: LocalTranscriber? = null
+
     private val dp get() = resources.displayMetrics.density
     private val screenW get() = resources.displayMetrics.widthPixels
     private val screenH get() = resources.displayMetrics.heightPixels
 
-    override fun onServiceConnected() { instance = this; showOverlay() }
+    override fun onServiceConnected() {
+        instance = this
+        showOverlay()
+        // Try to load local model in background
+        thread { initLocalModel() }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
-    override fun onDestroy() { instance = null; removeOverlay(); super.onDestroy() }
+
+    override fun onDestroy() {
+        instance = null
+        removeOverlay()
+        super.onDestroy()
+    }
+
+    private fun initLocalModel() {
+        val modelName = prefs().getString("model_name", "") ?: ""
+        if (modelName.isBlank()) {
+            // Auto-detect first available model
+            val models = LocalTranscriber.availableModels(this)
+            if (models.isNotEmpty()) {
+                Log.i(TAG, "Auto-detected model: ${models.first()}")
+                localTranscriber = LocalTranscriber.create(this, models.first())
+            }
+        } else {
+            localTranscriber = LocalTranscriber.create(this, modelName)
+        }
+        if (localTranscriber != null) {
+            Log.i(TAG, "Local transcription ready")
+        } else {
+            Log.i(TAG, "No local model found, will use API")
+        }
+    }
+
+    /** Reload local model (called from MainActivity when settings change) */
+    fun reloadModel() { thread { initLocalModel() } }
 
     // --- Overlay ---
 
@@ -83,7 +120,6 @@ class WhisperAccessibilityService : AccessibilityService() {
             y = screenH / 2 - size / 2
         }
 
-        // Drag + tap handling
         var startX = 0; var startY = 0
         var touchX = 0f; var touchY = 0f
 
@@ -105,7 +141,6 @@ class WhisperAccessibilityService : AccessibilityService() {
                     if (moved < TAP_THRESHOLD_DP * dp) {
                         onTap()
                     } else {
-                        // Snap to nearest horizontal edge
                         params.x = if (params.x + size / 2 > screenW / 2)
                             screenW - size - margin else margin
                         wm.updateViewLayout(v, params)
@@ -206,6 +241,53 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         if (pcm.isEmpty()) { reset("No audio captured"); return }
 
+        val useLocal = prefs().getBoolean("use_local", true)
+        val local = localTranscriber
+
+        if (useLocal && local != null) {
+            transcribeLocal(pcm, local)
+        } else {
+            transcribeApi(pcm)
+        }
+    }
+
+    private fun transcribeLocal(pcm: ByteArray, transcriber: LocalTranscriber) {
+        thread {
+            try {
+                // Convert 16-bit PCM bytes to float samples
+                val samples = FloatArray(pcm.size / 2)
+                for (i in samples.indices) {
+                    val lo = pcm[i * 2].toInt() and 0xFF
+                    val hi = pcm[i * 2 + 1].toInt()
+                    samples[i] = ((hi shl 8) or lo).toShort().toFloat() / 32768f
+                }
+
+                val t0 = System.currentTimeMillis()
+                val text = transcriber.transcribe(samples, SAMPLE_RATE)
+                val ms = System.currentTimeMillis() - t0
+                Log.i(TAG, "Local transcription: ${ms}ms, ${samples.size / SAMPLE_RATE}s audio")
+
+                handler.post {
+                    if (text.isNotBlank()) {
+                        injectText(text)
+                    } else {
+                        toast("No speech detected")
+                    }
+                    state = State.IDLE
+                    setAppearance(COLOR_IDLE)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Local transcription failed", e)
+                handler.post {
+                    toast("Local error: ${e.message}")
+                    state = State.IDLE
+                    setAppearance(COLOR_IDLE)
+                }
+            }
+        }
+    }
+
+    private fun transcribeApi(pcm: ByteArray) {
         val wav = WavWriter.encode(pcm)
         val apiKey = prefs().getString("api_key", "") ?: ""
         if (apiKey.isBlank()) { reset("Set API key in Phone Whisper app"); return }

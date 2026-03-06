@@ -28,13 +28,29 @@ class MainActivity : AppCompatActivity() {
         status = TextView(this).apply { textSize = 14f }
         layout.addView(status)
 
+        // --- Engine toggle ---
+        val useLocal = prefs().getBoolean("use_local", true)
+        val toggle = Switch(this).apply {
+            text = "Use local model (offline)"
+            isChecked = useLocal
+            setOnCheckedChangeListener { _, checked ->
+                prefs().edit().putBoolean("use_local", checked).apply()
+                updateStatus()
+            }
+        }
+        layout.addView(toggle)
+
+        // --- API key ---
+        layout.addView(TextView(this).apply {
+            text = "\nOpenAI API Key (for cloud mode):"
+            textSize = 12f
+        })
         val apiInput = EditText(this).apply {
-            hint = "OpenAI API Key"
+            hint = "sk-..."
             isSingleLine = true
             setText(prefs().getString("api_key", ""))
         }
         layout.addView(apiInput)
-
         layout.addView(Button(this).apply {
             text = "Save API Key"
             setOnClickListener {
@@ -43,6 +59,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        // --- Accessibility ---
         layout.addView(Button(this).apply {
             text = "Open Accessibility Settings"
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
@@ -67,15 +84,39 @@ class MainActivity : AppCompatActivity() {
         val audio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         val acc = WhisperAccessibilityService.instance != null
+        val useLocal = prefs().getBoolean("use_local", true)
         val key = (prefs().getString("api_key", "") ?: "").isNotBlank()
+        val models = LocalTranscriber.availableModels(this)
+        val hasLocal = models.isNotEmpty()
+        val localReady = WhisperAccessibilityService.instance?.let {
+            // Check if local transcriber is loaded via reflection-free check
+            true // We just check if models exist on disk
+        } ?: false
 
         status.text = buildString {
             appendLine()
             appendLine("Audio permission: ${if (audio) "✅" else "❌"}")
             appendLine("Accessibility service: ${if (acc) "✅" else "❌"}")
-            appendLine("API key: ${if (key) "✅" else "❌"}")
             appendLine()
-            if (audio && acc && key) appendLine("Ready! Tap the green dot to dictate.")
+            appendLine("── Engine ──")
+            if (useLocal) {
+                appendLine("Mode: 🏠 Local (offline)")
+                if (hasLocal) {
+                    appendLine("Models found: ${models.joinToString(", ")}")
+                } else {
+                    appendLine("⚠️ No models found!")
+                    appendLine("Push models via adb to:")
+                    appendLine("  /sdcard/Android/data/")
+                    appendLine("  com.kafkasl.phonewhisper/")
+                    appendLine("  files/models/<model-name>/")
+                }
+            } else {
+                appendLine("Mode: ☁️ Cloud (OpenAI API)")
+                appendLine("API key: ${if (key) "✅" else "❌"}")
+            }
+            appendLine()
+            val ready = audio && acc && (if (useLocal) hasLocal else key)
+            if (ready) appendLine("✅ Ready! Tap the overlay dot to dictate.")
             else appendLine("Complete the setup above.")
         }
     }
