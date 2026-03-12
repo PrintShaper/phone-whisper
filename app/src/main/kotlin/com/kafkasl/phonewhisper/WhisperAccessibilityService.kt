@@ -361,9 +361,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (focused != null) {
             val ok = focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
             focused.recycle()
-            if (!ok) toast("Copied to clipboard (paste failed)")
+            if (!ok) toast("Insert failed — text copied to clipboard")
         } else {
-            toast("Copied to clipboard")
+            toast("No text field focused — text copied to clipboard")
         }
         root?.recycle()
     }
