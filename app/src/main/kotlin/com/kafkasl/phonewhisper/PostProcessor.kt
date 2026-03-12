@@ -17,7 +17,7 @@ object PostProcessor {
     const val DEV_PROMPT = """<task>A text is provided which is a draft transcription from a speech to text model.
 Refine and polish the provided text, if needed, as follows:
   1. Correct any spelling errors, and look out for mis-identified project names,
-     including: Solveit, fastai, Answer.AI, nbdev, fastcore, FastHTML, L402, Hub, Codex, Claude Code, Hetzner.
+     including: Solveit, fast.ai, Answer.AI, nbdev, fastcore, FastHTML, Pi, Codex, Claude Code, Hetzner.
   2. Fix grammatical mistakes.
   3. Improve punctuation where necessary.
   4. Ensure consistent formatting.

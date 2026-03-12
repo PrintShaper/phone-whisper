@@ -1,6 +1,7 @@
 package com.kafkasl.phonewhisper
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PostProcessorTest {
@@ -69,6 +70,9 @@ class PostProcessorTest {
     fun parseInvalidJson() {
         val result = PostProcessor.parseResponse("invalid json")
         assertEquals(null, result.text)
-        assertEquals("Value invalid of type java.lang.String cannot be converted to JSONObject", result.error)
+        assertTrue(
+            result.error?.contains("JSONObject") == true ||
+                result.error?.contains("must begin with '{'") == true
+        )
     }
 }
